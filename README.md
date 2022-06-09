@@ -5,7 +5,7 @@ Authors:
 Sophie Yang, Mark K. J. Ooi, Daniel S. Falster, Will K. Cornwell
 
 
-Methods for extracting fire response data on resprouting and seeding from AusTraits are available in "code/extracting_fire_response_data.Rmd".
+Methods for extracting fire response data on resprouting and seeding from [AusTraits](https://austraits.org/) are available in "code/extracting_fire_response_data.Rmd".
 
 Methods for calculating the mean FRI across the distribution of each species/taxon using Poisson Regression are available in "code/mean_fri_poisson_regression_method.Rmd". Methods for using the survival analysis method closely following Simpson et al. (2021) are in "code/median_fri_survival_analysis_method".
 

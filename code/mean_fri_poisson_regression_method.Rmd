@@ -124,7 +124,7 @@ num_fires_raster <- rasterFromXYZ(full_fires_no_water)
 
 plot(num_fires_raster)
 
-#writeRaster(num_fires_raster, "processed_data/num_fires_map", format = "GTiff", overwrite = TRUE)
+writeRaster(num_fires_raster, "processed_data/num_fires_map", format = "GTiff", overwrite = TRUE)
 ```
 
 

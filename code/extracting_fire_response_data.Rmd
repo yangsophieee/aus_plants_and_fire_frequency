@@ -1,0 +1,774 @@
+---
+title: "extracting_fire_response_data"
+author: "Sophie"
+date: "25/08/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Start up AusTraits
+
+Load packages and AusTraits
+
+AusTraits can be accessed here:
+https://zenodo.org/record/5112001
+
+Or using the AusTraits package:
+https://traitecoevo.github.io/austraits/
+
+```{r}
+library(tidyverse)
+
+#austraits <- read_rds("raw_data/austraits-3.0.2.rds") # Latest release of austraits
+austraits <- read_rds("raw_data/austraits-sophie-branch.rds") # This is an updated rds 
+# file which includes the extra studies I added to austraits
+```
+
+
+
+---
+
+# Extract fire_response trait records
+
+
+Subset traits to fire_response records only
+
+```{r}
+fire_response <- 
+  austraits$traits %>% 
+  filter(trait_name == "fire_response") %>% 
+  select(-trait_name) %>% 
+  rename(fire_response = value)
+```
+
+
+Filter out non-native taxa
+
+```{r}
+aus_native_lookup <- read_csv("processed_data/aus_native_lookup.csv") 
+# See "code/make_aus_native_species_list.R" for classifying natives and non-natives
+
+fire_response <-
+  fire_response %>% 
+  left_join(aus_native_lookup,
+            by = "taxon_name") %>% 
+  filter(aus_native == TRUE) %>% 
+  select(-aus_native)
+```
+
+
+Join taxonomic information 
+
+```{r}
+fire_response <-
+    fire_response %>% 
+    left_join(austraits$taxa %>% 
+                select(taxon_name, genus, family, taxonRank, taxonomicStatus, taxonDistribution), 
+              by = "taxon_name")
+```
+
+
+Filter to species level and below species level data
+
+```{r}
+fire_response_cleaned <-
+  fire_response %>% 
+  filter(taxonRank == "Forma" | 
+         taxonRank == "Species" | 
+         taxonRank == "Varietas" | 
+         taxonRank == "Subspecies",
+         taxonomicStatus == "accepted")
+```
+
+
+Create dataframe with tallies of the number of observations for each value
+
+```{r}
+fire_response_summary <- 
+    fire_response_cleaned %>% 
+    group_by(taxon_name, fire_response, taxonRank) %>%
+    summarise(count = n()) %>% 
+    pivot_wider(names_from = fire_response,
+                values_from = count) %>% 
+    ungroup() %>% 
+    mutate(across(where(is.integer), ~ replace_na(., 0))) 
+
+names(fire_response_summary) <- 
+  names(fire_response_summary) %>% 
+  str_replace_all(c(" " = "_"))
+```
+
+
+Calculate a binary column for whether there is variation in observations across AusTraits
+
+```{r}
+col <- colnames(fire_response_summary)
+col <- col[!col %in% c("taxon_name", "taxonRank")]
+
+fire_response_summary <-
+  fire_response_summary %>% 
+  mutate(variation_in_strat = (rowSums(fire_response_summary[,col] > 0) > 1))
+```
+
+
+
+Exclude taxa that are observed as fire_not_relevant or unknown
+
+```{r}
+fire_response_summary <-
+  fire_response_summary %>% 
+  filter(!(fire_not_relevant >= 1 | 
+           fire_not_relevant_resprouts >= 1 | # Unsure if I should exclude
+           fire_not_relevant_not_fire_killed_does_not_resprout >= 1 | # Unsure if I should exclude
+           fire_killed_fire_not_relevant >= 1)) # Unsure if I should exclude
+```
+
+
+## For taxa with no variation in observation of fire response strategy
+
+```{r}
+fire_response_summary <- 
+  fire_response_summary %>% 
+  mutate(resprouting = if_else(variation_in_strat == FALSE,
+                               case_when(fire_killed >= 1 ~ "does not resprout",
+                                 resprouts >= 1 ~ "mostly resprouts",
+                                 fire_killed_resprouts >= 1 ~ "sometimes resprouts",
+                                 not_fire_killed_does_not_resprout >= 1 ~ "does not resprout"),
+                               "NA"))
+```
+
+
+## For taxa with variation
+
+Make columns that tally the number of observations of fire-killed, resprouts, mixed
+fire responses, fire resistors and no fire exposure into two groups (resprouts or
+does not resprout)
+
+```{r}
+fire_response_summary <-
+  fire_response_summary %>% 
+  mutate(resprout_tally = resprouts + fire_killed_resprouts,
+         does_not_resprout_tally = fire_killed + fire_killed_resprouts + not_fire_killed_does_not_resprout)
+```
+
+
+Plot histogram of percentage of resprout observations
+
+```{r}
+fire_response_summary <-
+    fire_response_summary %>% 
+    mutate(resprout_percent = resprout_tally / (resprout_tally + does_not_resprout_tally))
+
+fire_response_summary %>% 
+    filter(variation_in_strat == TRUE) %>% 
+    ggplot(aes(x = resprout_percent)) +
+    geom_histogram() +
+    scale_x_continuous(breaks = seq(0.0, 1.0, by = 0.1)) +
+    theme_classic()
+
+# Plot to decide where the cutoff is for species that do not resprout, 'sometimes'
+# resprout and 'mostly' resprouts -> If over 60% of observations are tallied for resprouting
+# the species 'mostly resprouts'
+```
+
+
+If over 60% of observations are resprouts, then can designate as mostly resprouts.
+If no observations are resprouts, designate as does not resprout.
+If less than 60% but more than 0 observations are resprouts, then designate as sometimes
+resprouts.
+
+```{r}
+fire_response_summary <- 
+  fire_response_summary %>% 
+  mutate(resprouting = if_else(variation_in_strat == TRUE,
+                                  case_when(
+                                    resprout_tally == 0 ~ 
+                                      "does not resprout", 
+                                    (resprout_tally / (resprout_tally + does_not_resprout_tally) < 0.6) ~
+                                      "sometimes resprouts",
+                                    (resprout_tally / (resprout_tally + does_not_resprout_tally) >= 0.6) ~ 
+                                      "mostly resprouts"),
+                                  resprouting))
+```
+
+
+
+Summary of final resprouting values and counts
+
+```{r}
+fire_response_summary %>% 
+    group_by(resprouting) %>% 
+    summarise(count = n()) %>% 
+    ungroup()
+
+# Final tibble for resprouting variable
+resprouting <- 
+    fire_response_summary %>% 
+    select(taxon_name, taxonRank, resprouting)
+```
+
+
+---
+
+# Extract fire_cued_seeding trait records
+
+
+Subset traits to fire_cued_seeding records only
+
+```{r}
+fire_cued_seeding <- 
+  austraits$traits %>% 
+  filter(trait_name == "fire_cued_seeding") %>% 
+  select(-trait_name) %>% 
+  rename(fire_cued_seeding = value)
+```
+
+
+Filter out non-native species
+
+```{r}
+fire_cued_seeding <-
+  fire_cued_seeding %>% 
+  left_join(aus_native_lookup,
+            by = "taxon_name") %>% 
+  filter(aus_native == TRUE) %>% 
+  select(-aus_native)
+```
+
+
+Join taxonomic information 
+
+```{r}
+fire_cued_seeding <-
+    fire_cued_seeding %>% 
+    left_join(austraits$taxa %>% 
+                select(taxon_name, genus, family, taxonRank, taxonomicStatus, taxonDistribution), 
+              by = "taxon_name")
+```
+
+
+Filter to species level and below species level data
+
+```{r}
+fire_cued_seeding_cleaned <-
+  fire_cued_seeding %>% 
+  filter(taxonRank == "Forma" | 
+         taxonRank == "Species" | 
+         taxonRank == "Varietas" | 
+         taxonRank == "Subspecies",
+         taxonomicStatus == "accepted")
+```
+
+
+
+Create dataframe with tallies of the number of observations for each value
+
+```{r}
+fire_cued_seeding_summary <- 
+    fire_cued_seeding_cleaned %>% 
+    group_by(taxon_name, fire_cued_seeding, taxonRank) %>%
+    summarise(count = n()) %>% 
+    pivot_wider(names_from = fire_cued_seeding,
+                values_from = count) %>% 
+    ungroup() %>% 
+    mutate(across(where(is.integer), ~ replace_na(., 0))) 
+
+names(fire_cued_seeding_summary) <- 
+  names(fire_cued_seeding_summary) %>% 
+  str_replace_all(c(" " = "_"))
+```
+
+
+Calculate a binary column for whether there is variation in observations
+
+```{r}
+col <- colnames(fire_cued_seeding_summary)
+col <- col[!col %in% c("taxon_name", "taxonRank")]
+
+fire_cued_seeding_summary <-
+  fire_cued_seeding_summary %>% 
+  mutate(variation_in_seeding = (rowSums(fire_cued_seeding_summary[,col] > 0) > 1)) 
+```
+
+
+## For taxa with no variation in observation of fire-cued seeding 
+
+```{r}
+fire_cued_seeding_summary <- 
+  fire_cued_seeding_summary %>% 
+  mutate(post_fire_seeding = if_else(variation_in_seeding == FALSE,
+                                     case_when(fire_cued_seeding >= 1 ~ 
+                                                 "robust post-fire seeding",
+                                               no_fire_cued_seeding >= 1 ~ 
+                                                 "no post-fire seeding",
+                                               fire_cued_seeding_incomplete_germination >= 1 ~ 
+                                                 "some post-fire seeding",
+                                               fire_cued_seeding_high_fire_cued_seeding_moderate >= 1 ~ 
+                                                 "robust post-fire seeding",
+                                               fire_cued_seeding_high >= 1 ~
+                                                 "robust post-fire seeding",
+                                               fire_cued_seeding_minimal >= 1 ~
+                                                 "some post-fire seeding",
+                                               fire_cued_seeding_complete_germination >= 1 ~
+                                                 "robust post-fire seeding",
+                                               fire_cued_seeding_minimal_no_fire_cued_seeding >= 1 ~
+                                                 "some post-fire seeding",
+                                               fire_cued_seeding_no_fire_cued_seeding >= 1 ~
+                                                 "some post-fire seeding",
+                                               fire_cued_seeding_moderate >= 1 ~
+                                                 "robust post-fire seeding", 
+                                              fire_cued_seeding_high_fire_cued_seeding_minimal_no_fire_cued_seeding >= 1 ~
+                                                 "some post-fire seeding",
+                                               fire_cued_seeding_moderate_no_fire_cued_seeding >= 1 ~
+                                                 "some post-fire seeding"),
+                                     "NA"))
+```
+
+
+
+## For taxa with no variation
+
+
+Make columns that tally the number of observations into two groups - fire-cued seeding
+or no fire-cued seeding
+
+```{r}
+fire_cued_seeding_summary <-
+  fire_cued_seeding_summary %>% 
+  mutate(fire_cued_seeding_tally = 
+           fire_cued_seeding + 
+           fire_cued_seeding_incomplete_germination +
+           fire_cued_seeding_high_fire_cued_seeding_moderate + 
+           fire_cued_seeding_high +
+           fire_cued_seeding_complete_germination + 
+           fire_cued_seeding_high_no_fire_cued_seeding +
+           fire_cued_seeding_no_fire_cued_seeding + 
+           fire_cued_seeding_moderate + 
+           fire_cued_seeding_high_fire_cued_seeding_minimal + 
+           fire_cued_seeding_minimal_fire_cued_seeding_moderate + 
+           fire_cued_seeding_high_fire_cued_seeding_minimal_no_fire_cued_seeding +
+           fire_cued_seeding_moderate_no_fire_cued_seeding,
+         no_seeding_tally = 
+           no_fire_cued_seeding + 
+           fire_cued_seeding_minimal +  
+           fire_cued_seeding_high_no_fire_cued_seeding +
+           fire_cued_seeding_minimal_no_fire_cued_seeding + 
+           fire_cued_seeding_no_fire_cued_seeding +
+           fire_cued_seeding_high_fire_cued_seeding_minimal + 
+           fire_cued_seeding_minimal_fire_cued_seeding_moderate +
+           fire_cued_seeding_high_fire_cued_seeding_minimal_no_fire_cued_seeding +
+           fire_cued_seeding_moderate_no_fire_cued_seeding)
+```
+
+
+Plot histogram of percentage of seeding observations
+
+```{r}
+fire_cued_seeding_summary <-
+  fire_cued_seeding_summary %>% 
+  mutate(seeding_percent = fire_cued_seeding_tally / (fire_cued_seeding_tally + no_seeding_tally))
+
+fire_cued_seeding_summary %>% 
+  filter(variation_in_seeding == TRUE) %>% 
+  ggplot(aes(x = seeding_percent)) +
+  geom_histogram() +
+  scale_x_continuous(breaks = seq(0.0, 1.0, by = 0.1)) +
+  theme_bw()
+```
+
+
+If over 60% of observations are fire-cued seeding, then can designate as robust 
+post-fire seeding. If no observations are fire-cued seeding, designate as no post-fire
+seeding. If less than 60% but more than 0 observations are fire-cued seeding, then 
+designate as some post-fire seeding. (Decided 60% based on previous histogram)
+
+```{r}
+fire_cued_seeding_summary <- 
+  fire_cued_seeding_summary %>% 
+  mutate(post_fire_seeding = if_else(variation_in_seeding == TRUE,
+                                  case_when(
+                                    fire_cued_seeding_tally == 0 ~ 
+                                      "no post-fire seeding", 
+                                    (fire_cued_seeding_tally / (fire_cued_seeding_tally + no_seeding_tally) < 0.6) ~
+                                      "some post-fire seeding",
+                                    (fire_cued_seeding_tally / (fire_cued_seeding_tally + no_seeding_tally) >= 0.6) ~ 
+                                      "robust post-fire seeding"),
+                                  post_fire_seeding))
+```
+
+
+Summary of final seeding values and counts
+
+```{r}
+fire_cued_seeding_summary %>% 
+  group_by(post_fire_seeding) %>% 
+  summarise(count = n()) %>% 
+  ungroup()
+
+# Final tibble for seeding variable
+post_fire_seeding <- fire_cued_seeding_summary %>% 
+  select(taxon_name, taxonRank, post_fire_seeding)
+```
+
+
+
+---
+
+# Join fire_response and fire_cued_seeding
+
+```{r}
+fire_response_taxa <- fire_response_summary$taxon_name %>% unique() # 8220 taxa
+seeding_taxa <- fire_cued_seeding_summary$taxon_name %>% unique() # 3013 taxa
+
+intersecting_taxa <- intersect(fire_response_taxa, seeding_taxa)
+# 2935 taxa intersect between fire_cued_seeding and fire_response
+```
+
+
+Join resprouting and seeding variables
+
+```{r}
+resprouting_seeding <- 
+  resprouting %>% 
+  full_join(post_fire_seeding, by = c("taxon_name", "taxonRank"))
+
+resprouting_seeding <-
+  resprouting_seeding %>% 
+  mutate(data_on_both = !is.na(resprouting) & !is.na(post_fire_seeding))
+```
+
+
+Make new resprouter or seeder variable
+
+```{r}
+resprouting_seeding <-
+  resprouting_seeding %>% 
+  mutate(resprouter_or_seeder = case_when(
+    (resprouting == "mostly resprouts" | resprouting == "sometimes resprouts") & (post_fire_seeding == "no post-fire seeding" | is.na(post_fire_seeding)) ~ 
+      "resprouter",
+    (post_fire_seeding == "some post-fire seeding" | post_fire_seeding == "robust post-fire seeding") & (resprouting == "does not resprout" | is.na(resprouting)) ~ 
+      "seeder",
+    (resprouting == "mostly resprouts" | resprouting == "sometimes resprouts") & (post_fire_seeding == "some post-fire seeding" | post_fire_seeding == "robust post-fire seeding") ~ 
+      "facultative",
+    (resprouting == "does not resprout" | is.na(resprouting)) & (post_fire_seeding == "no post-fire seeding" | is.na(post_fire_seeding)) ~
+      "neither"))
+```
+
+
+Clean data
+
+```{r}
+# Remove hybrids
+resprouting_seeding <-
+  resprouting_seeding %>% 
+  filter(!str_detect(taxon_name, 
+                     pattern = " x "))
+
+# Align taxonRank values with gbif taxonrank values
+resprouting_seeding$taxonRank <-
+  resprouting_seeding$taxonRank %>% 
+  str_replace("Forma", "Form") 
+
+resprouting_seeding$taxonRank <-
+  resprouting_seeding$taxonRank %>% 
+  str_replace("Varietas", "Variety") 
+
+resprouting_seeding$taxonRank <-
+  resprouting_seeding$taxonRank %>% 
+  toupper()
+
+# Make variables ordered factors
+resprouting_seeding$resprouting <- 
+  factor(resprouting_seeding$resprouting, 
+         ordered = TRUE,
+         levels = c("does not resprout", "sometimes resprouts", "mostly resprouts"))
+
+resprouting_seeding$post_fire_seeding <- 
+  factor(resprouting_seeding$post_fire_seeding, 
+         ordered = TRUE,
+         levels = c("no post-fire seeding", "some post-fire seeding", "robust post-fire seeding"))
+
+resprouting_seeding$resprouter_or_seeder <- 
+  factor(resprouting_seeding$resprouter_or_seeder, 
+         ordered = TRUE,
+         levels = c("resprouter", "seeder", "facultative", "neither"))
+```
+
+
+Summarise values
+
+```{r}
+resprouting_seeding %>% 
+  group_by(resprouter_or_seeder) %>% 
+  summarise(count = n()) %>% 
+  ungroup()
+
+# Filter for taxa with data on both variables
+resprouting_seeding %>% 
+  filter(data_on_both == TRUE) %>% 
+  group_by(resprouter_or_seeder) %>% 
+  summarise(count = n()) %>% 
+  ungroup()
+```
+
+
+
+---
+
+Add in growth form column
+
+```{r}
+growth_forms <-
+  austraits$traits %>% 
+  filter(trait_name == "plant_growth_form") %>% 
+  select(taxon_name, value) %>% 
+  rename(growth_form = value)
+
+resprouting_seeding_gf <-
+  resprouting_seeding %>% 
+  left_join(growth_forms, by = "taxon_name") %>% 
+  group_by(taxon_name, taxonRank, resprouting, 
+           post_fire_seeding, data_on_both, resprouter_or_seeder) %>% 
+  summarise(final_growth_form = names(sort(table(growth_form, useNA = "ifany"), decreasing = TRUE)[1])) %>% 
+  ungroup()
+```
+
+
+
+Column for woody or herbaceous
+
+```{r}
+# Put semi-woody plants like tree ferns, palms and cycads as ambiguous
+ambiguous <- 
+    c("climber", "climber_herb climber_shrub", "climber_scrambler", "climber_twiner", 
+      "climber_vine", "epiphyte", "geophyte", "hemi-parasite parasite", "parasite", 
+      "prostrate", NA)
+woody <- 
+    c("climber_liana", "climber_shrub", "prostrate_shrub", "shrub", "shrub tree", 
+      "shrub treelet", "subshrub", "tree", "treelet")
+herbaceous <- 
+    c("aquatic", "aquatic_herb", "climber_herb", "climber_vine_herbaceous", "fern", 
+      "graminoid", "graminoid_not_tussock", "graminoid_not_tussock_tall", "graminoid_tussock",
+      "graminoid_tussock_tall", "herb", "herb_large", "prostrate_herb", "short_basal", 
+      "long_basal", "erect_leafy", "herb shrub")
+semi_woody <- 
+    c("cycad", "fern_tree", "palm", "pandanus")
+```
+
+
+
+```{r}
+resprouting_seeding_gf <-
+    resprouting_seeding_gf %>% 
+    mutate(woody_or_herb = case_when(final_growth_form %in% woody ~ "woody",
+                                     final_growth_form %in% herbaceous ~ "herb",
+                                     final_growth_form %in% semi_woody ~ "semi-woody",
+                                     final_growth_form %in% ambiguous ~ "unclear"))
+
+resprouting_seeding_gf %>% 
+    group_by(woody_or_herb) %>% 
+    summarise(count = n()) %>% 
+    ungroup()
+
+# 3003 herbs, 4825 woody, 12 semi-woody, 422 unclear
+```
+
+
+Make binomial fire response variables
+
+```{r}
+resprouting_seeding <-
+    resprouting_seeding_gf %>% 
+    mutate(resprouting_binomial = case_when(
+               resprouting %in% c("mostly resprouts", "sometimes resprouts") ~ TRUE, 
+               resprouting %in% c("does not resprout") ~ FALSE),
+           seeding_binomial = case_when(
+               post_fire_seeding %in% c("robust post-fire seeding", "some post-fire seeding") ~ TRUE,
+               post_fire_seeding %in% c("no post-fire seeding") ~ FALSE),
+           obligate_resprouting_or_seeding = if_else(data_on_both == TRUE, case_when(
+               resprouter_or_seeder == "seeder" ~ "obligate seeder",
+               resprouter_or_seeder == "resprouter" ~ "obligate resprouter"
+           ), NA_character_),
+           resprouting_seeding_binomial = if_else(data_on_both == TRUE, case_when(
+             resprouting == "mostly resprouts" & post_fire_seeding == "some post-fire seeding" ~ "resprouter",
+             resprouting == "sometimes resprouts" & post_fire_seeding == "robust post-fire seeding" ~ "seeder",
+             resprouter_or_seeder == "seeder" ~ "seeder",
+             resprouter_or_seeder == "resprouter" ~ "resprouter"
+           ), NA_character_))
+```
+
+
+
+Make ordered factors
+```{r}
+resprouting_seeding$resprouting <- 
+  factor(resprouting_seeding$resprouting, 
+         ordered = TRUE,
+         levels = c("does not resprout", "sometimes resprouts", "mostly resprouts"))
+
+resprouting_seeding$post_fire_seeding <- 
+  factor(resprouting_seeding$post_fire_seeding, 
+         ordered = TRUE,
+         levels = c("no post-fire seeding", "some post-fire seeding", "robust post-fire seeding"))
+
+resprouting_seeding$resprouter_or_seeder <- 
+  factor(resprouting_seeding$resprouter_or_seeder, 
+         ordered = TRUE,
+         levels = c("resprouter", "seeder", "facultative", "neither"))
+
+saveRDS(resprouting_seeding, "processed_data/resprouting_seeding.rds")
+```
+
+
+---
+
+# Read in gbif data
+
+The GBIF download and cleaning process is in "code/gbif_cleaning_process.R"
+
+The doi for our GBIF download is: https://doi.org/10.15468/dl.6rghq7
+
+```{r}
+gbif <- read_csv("raw_data/filt_aus_limited_columns_v3.csv") %>% select(-day, -month, -year)
+```
+
+
+Add in matching taxa with manually found taxonomic synonyms
+
+```{r}
+# Read in new csv with manually found taxonomic synonyms
+non_matching_taxa_matched <- read_csv("processed_data/non_matching_taxa_matched.csv")
+```
+
+
+Add column with the gbif names that can be matched to austraits
+
+```{r}
+# Replace austraits taxa with manually matched synonyms
+resprouting_seeding <-
+  resprouting_seeding %>% 
+  left_join(non_matching_taxa_matched,
+            by = c("taxon_name" = "non_matching_taxa")) %>% 
+  select(-no_occurrences)
+
+resprouting_seeding <-
+  resprouting_seeding %>% 
+  mutate(taxon_name = if_else(
+    !is.na(matched_with_gbif),
+    matched_with_gbif,
+    taxon_name
+  )) %>% 
+  select(-matched_with_gbif)
+
+
+# Mutate gbif taxa to be the same names in austraits
+
+gbif <-
+  gbif %>% 
+  mutate(matched_name = case_when(scientificname %in% resprouting_seeding$taxon_name ~
+                                    scientificname,
+                                  verbatimscientificname %in% resprouting_seeding$taxon_name ~
+                                    verbatimscientificname,
+                                  species %in% resprouting_seeding$taxon_name ~
+                                    species))
+```
+
+
+## Join gbif species occurrences to austraits data
+
+
+```{r}
+joined_fire_data_inner <-
+  resprouting_seeding %>% 
+  inner_join(gbif, by = c("taxon_name" = "matched_name", "taxonRank" = "taxonrank"))
+
+joined_fire_data_inner_taxa <- joined_fire_data_inner$taxon_name %>% unique()
+```
+
+
+```{r}
+# Non-matching taxa
+joined_fire_data_anti <-
+  resprouting_seeding %>% 
+  anti_join(gbif, by = c("taxon_name" = "matched_name", "taxonRank" = "taxonrank"))
+
+#joined_fire_data_anti <-
+#  joined_fire_data_anti %>% 
+#  mutate(matched_with_gbif = NA)
+
+#write_csv(joined_fire_data_anti, "processed_data/non_matching_taxa.csv")
+
+# These are probably rare species or the names are not accepted in WCVP
+```
+
+
+
+## Try use Will's powo_apc_lookup to match more taxa
+
+```{r}
+powo_apc_lookup <- read_csv("processed_data/powo_apc_lookup.csv")
+# See "code/make_taxonomy_lookup.R" for making matches between POWO/WCVP/GBIF and
+# AusTraits (APC)
+```
+
+
+```{r}
+resprouting_seeding <-
+    resprouting_seeding %>%
+    mutate(binomialAPCname = word(taxon_name, 1, 2)) 
+
+resprouting_seeding <-
+    resprouting_seeding %>% 
+    left_join(powo_apc_lookup, by = c("binomialAPCname", "taxonRank"))
+
+manual_matches <- c("Boronia anemonifolia", 
+                    "Cuscuta australis",
+                    "Cyperus pygmaeus",
+                    "Grewia latifolia",
+                    "Heliotropium paniculatum",
+                    "Hibiscus pentaphyllus",
+                    "Leucopogon cuspidatus",
+                    "Trichocline spathulata")
+
+# Only picked the ones where it was unambiguous what the matching GBIF name is
+# E.g. if a taxa could be matched to multiple different GBIF taxa then I did not
+# swap it
+# Since all the taxa I found were species level, I could just match to the binomial
+# POWO name
+
+# Replace austraits taxa with GBIF names
+resprouting_seeding <-
+    resprouting_seeding %>% 
+    mutate(taxon_name = if_else(taxon_name %in% manual_matches, 
+                                binomialPOWOname, # Replace with POWO name
+                                taxon_name)) # Else, leave it
+
+resprouting_seeding <-
+    resprouting_seeding %>% 
+    select(-fullAPCname, -binomialAPCname, -binomialPOWOname, -POWOinfra) %>% 
+    distinct(.keep_all = TRUE)
+
+# Mutate gbif taxa to be the same names in austraits
+gbif <-
+  gbif %>% 
+  mutate(matched_name = case_when(scientificname %in% resprouting_seeding$taxon_name ~
+                                    scientificname,
+                                  verbatimscientificname %in% resprouting_seeding$taxon_name ~
+                                    verbatimscientificname,
+                                  species %in% resprouting_seeding$taxon_name ~
+                                    species))
+
+# Does not include austraits taxa that cannot be matched to gbif records
+joined_fire_data_inner <-
+    resprouting_seeding %>% 
+    inner_join(gbif, by = c("taxon_name" = "matched_name", "taxonRank" = "taxonrank"))
+
+joined_fire_data_inner_taxa <- joined_fire_data_inner$taxon_name %>% unique()
+
+saveRDS(joined_fire_data_inner, file = "processed_data/fire_response_and_gbif_data.rds")
+```
+
+
+
